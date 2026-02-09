@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security;
 using System.Security.Permissions;
 using UnityEngine;
@@ -18,7 +19,7 @@ using Watcher;
 namespace WhoEatsWhom
 {
 
-    [BepInPlugin("ShinyKelp.WhoEatsWhom", "Who Eats Whom", "1.0.0")]
+    [BepInPlugin("ShinyKelp.WhoEatsWhom", "Who Eats Whom", "1.1.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void OnEnable()
@@ -26,7 +27,13 @@ namespace WhoEatsWhom
             On.RainWorld.OnModsInit += RainWorldOnOnModsInit;
         }
 
+        HashSet<(string, string)> appliedRelationships;
+        string outputMsg;
+        Dictionary<string, int> creatureIndexes;
+        Dictionary<string, CreatureTemplate.Relationship.Type> relationshipTypes;
+
         private bool IsInit;
+
         private void RainWorldOnOnModsInit(On.RainWorld.orig_OnModsInit orig, RainWorld self)
         {
             orig(self);
@@ -47,25 +54,38 @@ namespace WhoEatsWhom
         private void CreateCustomRelationships(On.StaticWorld.orig_InitStaticWorld orig)
         {
             orig();
-            SetRelationshipsFromDirectory();
+            if(appliedRelationships is null)
+                appliedRelationships = new HashSet<(string, string)>();
+            appliedRelationships.Clear();
+            outputMsg = "";
+            ModSetup();
+            SearchModsForRelationshipFiles();
+            SetRelationshipsFromMainDirectory();
+            try
+            {
+                File.WriteAllText(
+                    Custom.RootFolderDirectory() + "/WhoEatsWhom/output.txt",
+                    outputMsg,
+                    System.Text.Encoding.UTF8
+                );
+            }catch(Exception e)
+            {
+                Logger.LogError(e);
+            }
         }
 
-        Dictionary<string, int> creatureIndexes;
-        Dictionary<string, CreatureTemplate.Relationship.Type> relationshipTypes;
-
-        public void SetRelationshipsFromDirectory()
+        private void ModSetup()
         {
             if (!Directory.Exists(Custom.RootFolderDirectory() + "/WhoEatsWhom"))
                 Directory.CreateDirectory(Custom.RootFolderDirectory() + "/WhoEatsWhom");
 
             if (!Directory.Exists(Custom.RootFolderDirectory() + "/WhoEatsWhom/Relationships"))
                 Directory.CreateDirectory(Custom.RootFolderDirectory() + "/WhoEatsWhom/Relationships");
-            if(creatureIndexes == null)
+            if (creatureIndexes == null)
                 creatureIndexes = new Dictionary<string, int>();
             creatureIndexes.Clear();
-            foreach(CreatureTemplate ct in StaticWorld.creatureTemplates)
+            foreach (CreatureTemplate ct in StaticWorld.creatureTemplates)
                 creatureIndexes.Add(ct.type.ToString(), ct.type.index);
-
 
             if (relationshipTypes == null)
                 relationshipTypes = new Dictionary<string, CreatureTemplate.Relationship.Type>();
@@ -83,8 +103,6 @@ namespace WhoEatsWhom
             relationshipTypes.Add(CreatureTemplate.Relationship.Type.SocialDependent.ToString(), CreatureTemplate.Relationship.Type.SocialDependent);
             relationshipTypes.Add(CreatureTemplate.Relationship.Type.StayOutOfWay.ToString(), CreatureTemplate.Relationship.Type.StayOutOfWay);
 
-            Debug.Log("Set up dictionaries.");
-
             //Create readme
             string readmeContents = "Welcome to the relationship customizer! Here you can find a list of all valid creatures and valid relationships\n" +
                 "NOTE: This file is overwritten every time the game loads. Do not touch this file!\n\n" +
@@ -92,7 +110,7 @@ namespace WhoEatsWhom
                 "Creature_A : Creature_B : Relationship_Type : Relationship_Intensity\n\n" +
                 " === RELATIONSHIP TYPES ===\n";
 
-            foreach(var relationshipType in relationshipTypes)
+            foreach (var relationshipType in relationshipTypes)
                 readmeContents += relationshipType.Value + "\n";
 
             readmeContents += "\n === CREATURE NAMES ===\n";
@@ -101,22 +119,51 @@ namespace WhoEatsWhom
 
             string directoryPath = Custom.RootFolderDirectory() + "/WhoEatsWhom/Relationships";
 
-            File.WriteAllText(
-                Custom.RootFolderDirectory() + "/WhoEatsWhom/Readme.txt",
-                readmeContents,
-                System.Text.Encoding.UTF8
-            );
-
-            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*.txt"))
+            try
             {
-                Debug.Log("\nSETTING RELATIONSHIPS FROM: " + Path.GetFileName(filePath));
+                File.WriteAllText(
+                    Custom.RootFolderDirectory() + "/WhoEatsWhom/Readme.txt",
+                    readmeContents,
+                    System.Text.Encoding.UTF8
+                );
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex);
+            }
+        }
+
+        private void SetRelationshipsFromMainDirectory()
+        {
+
+            string directoryPath = Custom.RootFolderDirectory() + "/WhoEatsWhom/Relationships";
+
+            foreach (string filePath in Directory.EnumerateFiles(directoryPath, "*.txt").OrderBy(f => f))
+            {
                 SetRelationshipsFromFile(filePath);
             }
         }
 
-        private void SetRelationshipsFromFile(string path)
+        private void SearchModsForRelationshipFiles()
         {
-            foreach (var line in File.ReadLines(path))
+            foreach(ModManager.Mod mod in ModManager.ActiveMods)
+            {
+                string modPath = mod.basePath + "/WhoEatsWhom";
+                if (Directory.Exists(modPath))
+                {
+                    outputMsg += $"MOD: {mod.name}\n";
+                    foreach (string filePath in Directory.EnumerateFiles(modPath, "*.txt").OrderBy(f => f))
+                    {
+                        SetRelationshipsFromFile(filePath);
+                    }
+                }
+            }
+        }
+
+        private void SetRelationshipsFromFile(string filePath)
+        {
+            outputMsg += $"\nSETTING RELATIONSHIPS FROM: {Path.GetFileName(filePath)}\n";
+            foreach (var line in File.ReadLines(filePath))
             {
                 if (string.IsNullOrEmpty(line) || line.StartsWith("//"))
                     continue;
@@ -132,7 +179,7 @@ namespace WhoEatsWhom
 
                 if (splitLine.Length != 4)
                 {
-                    Debug.Log($"(INVALID) {line} <-- Wrong format.");
+                    outputMsg += ($"(INVALID) {line} <-- Wrong format.\n");
                     continue;
                 }
 
@@ -175,17 +222,24 @@ namespace WhoEatsWhom
                 }
                 if (!error)
                 {
-                    StaticWorld.creatureTemplates[creatureIndexes[creatureA]].relationships[creatureIndexes[creatureB]].type = relationshipTypes[type];
-                    StaticWorld.creatureTemplates[creatureIndexes[creatureA]].relationships[creatureIndexes[creatureB]].intensity = intensity;
-                    Debug.Log(withoutComments);
+                    if(appliedRelationships.Contains((creatureA, creatureB)))
+                    {
+                        outputMsg += ($"(WARN) {line} <-- Relationship already modified. This line will be ignored.\n");
+                    }
+                    else
+                    {
+                        StaticWorld.creatureTemplates[creatureIndexes[creatureA]].relationships[creatureIndexes[creatureB]].type = relationshipTypes[type];
+                        StaticWorld.creatureTemplates[creatureIndexes[creatureA]].relationships[creatureIndexes[creatureB]].intensity = intensity;
+                        appliedRelationships.Add((creatureA, creatureB));
+                        outputMsg += (withoutComments + "\n");
+                    }
                 }
                 else
                 {
-                    Debug.Log($"(INVALID) {line} <-- {errorLine}");
+                    outputMsg += ($"(INVALID) {line} <-- {errorLine}\n");
                 }
             }
         }
-
 
         private void RainWorldGameOnShutDownProcess(On.RainWorldGame.orig_ShutDownProcess orig, RainWorldGame self)
         {
@@ -193,13 +247,14 @@ namespace WhoEatsWhom
             ClearMemory();
         }
 
-
         private void ClearMemory()
         {
             if(creatureIndexes != null)
                 creatureIndexes.Clear();
             if(relationshipTypes != null) 
                 relationshipTypes.Clear();
+            if(appliedRelationships != null)
+                appliedRelationships.Clear();
         }
 
     }
